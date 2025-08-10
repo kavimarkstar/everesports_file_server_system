@@ -100,43 +100,45 @@ const tournamentUpload = multer({ storage: tournamentStorage });
 
 
 
+async function connectToDatabase() {
+  try {
+    const client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    db = client.db('everesports');
+    console.log('Connected to MongoDB successfully');
+  } catch (error) {
+    console.error('Failed to connect to MongoDB:', error);
+    process.exit(1);
+  }
+}
+
 // API Endpoints
 
 // Get user's cristol balance
 app.get('/api/users-cristols/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
+    const usersCristolCollection = db.collection('users_cristols');
     
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
-    const usersCristolsCollection = db.collection('users_cristols');
-    
-    // Find user's cristol document
-    const userCristol = await usersCristolsCollection.findOne({ userId: userId });
+    // Find user's cristol balance
+    let userCristol = await usersCristolCollection.findOne({ userId: userId });
     
     if (!userCristol) {
-      // Create new cristol account if user doesn't have one
-      const newCristolAccount = {
+      // Create new entry if user doesn't exist
+      const newUserCristol = {
         userId: userId,
         amountCristol: 0,
         createdAt: new Date(),
         updatedAt: new Date()
       };
       
-      await usersCristolsCollection.insertOne(newCristolAccount);
-      
-      return res.json({
-        userId: userId,
-        amountCristol: 0,
-        message: 'New cristol account created'
-      });
+      const result = await usersCristolCollection.insertOne(newUserCristol);
+      userCristol = { ...newUserCristol, _id: result.insertedId };
     }
     
     res.json({
       userId: userCristol.userId,
-      amountCristol: userCristol.amountCristol || 0
+      amountCristol: userCristol.amountCristol
     });
     
   } catch (error) {
@@ -145,30 +147,44 @@ app.get('/api/users-cristols/:userId', async (req, res) => {
   }
 });
 
-// Activate premium package
+// Activate package endpoint
 app.post('/api/activate-package', async (req, res) => {
   try {
-    const { userId, packageName, packageId, duration = 30, price } = req.body;
+    const { userId, packageName, packageId, duration, price } = req.body;
     
-    if (!userId || !packageName || !packageId) {
+    if (!userId || !packageName || !packageId || !duration || price === undefined) {
       return res.status(400).json({ 
-        error: 'userId, packageName, and packageId are required' 
+        success: false, 
+        message: 'Missing required fields' 
       });
     }
-
-    // Convert price from USD to cristols (assuming 1 USD = 100 cristols)
-    const priceInUSD = parseFloat(price.replace(/[^0-9.]/g, ''));
-    const cristolCost = Math.round(priceInUSD * 100);
     
-    // Check if user has sufficient cristols
-    const usersCristolsCollection = db.collection('users_cristols');
-    const userCristol = await usersCristolsCollection.findOne({ userId: userId });
+    const usersCristolCollection = db.collection('users_cristols');
+    const activePackageCollection = db.collection('active_package');
     
-    if (!userCristol || userCristol.amountCristol < cristolCost) {
+    // Get user's current cristol balance
+    const userCristol = await usersCristolCollection.findOne({ userId: userId });
+    if (!userCristol) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'User not found' 
+      });
+    }
+    
+    // Convert price to cristols (price is already in cristols)
+    const priceInCristol = parseInt(price);
+    if (isNaN(priceInCristol) || priceInCristol < 0) {
       return res.status(400).json({ 
-        error: 'Insufficient cristols',
-        required: cristolCost,
-        available: userCristol ? userCristol.amountCristol : 0
+        success: false, 
+        message: 'Invalid price' 
+      });
+    }
+    
+    // Check if user has enough cristols
+    if (userCristol.amountCristol < priceInCristol) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Insufficient cristols' 
       });
     }
     
@@ -178,43 +194,39 @@ app.post('/api/activate-package', async (req, res) => {
     expiryDate.setDate(expiryDate.getDate() + duration);
     
     // Check if user already has an active package
-    const activePackageCollection = db.collection('active_package');
-    const existingActivePackage = await activePackageCollection.findOne({
+    const existingPackage = await activePackageCollection.findOne({
       userId: userId,
       status: 'active',
       expiryDate: { $gt: new Date() }
     });
     
-    if (existingActivePackage) {
+    if (existingPackage) {
       return res.status(400).json({ 
-        error: 'User already has an active package',
-        currentPackage: existingActivePackage.packageName,
-        expiresAt: existingActivePackage.expiryDate
+        success: false, 
+        message: 'User already has an active package' 
       });
     }
     
-    // Create new active package record
+    // Insert new active package
     const newActivePackage = {
       userId: userId,
-      packageId: packageId,
       packageName: packageName,
+      packageId: packageId,
       activationDate: activationDate,
       expiryDate: expiryDate,
-      duration: duration,
-      price: price,
-      cristolCost: cristolCost,
       status: 'active',
+      price: priceInCristol,
       createdAt: new Date(),
       updatedAt: new Date()
     };
     
     await activePackageCollection.insertOne(newActivePackage);
     
-    // Deduct cristols from user's account
-    await usersCristolsCollection.updateOne(
+    // Deduct cristols from user's balance
+    await usersCristolCollection.updateOne(
       { userId: userId },
       { 
-        $inc: { amountCristol: -cristolCost },
+        $inc: { amountCristol: -priceInCristol },
         $set: { updatedAt: new Date() }
       }
     );
@@ -222,19 +234,16 @@ app.post('/api/activate-package', async (req, res) => {
     res.json({
       success: true,
       message: 'Package activated successfully',
-      package: {
-        name: packageName,
-        activationDate: activationDate,
-        expiryDate: expiryDate,
-        duration: duration,
-        cristolCost: cristolCost
-      },
-      remainingCristol: userCristol.amountCristol - cristolCost
+      package: newActivePackage,
+      remainingCristol: userCristol.amountCristol - priceInCristol
     });
     
   } catch (error) {
     console.error('Error activating package:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    });
   }
 });
 
@@ -242,40 +251,25 @@ app.post('/api/activate-package', async (req, res) => {
 app.get('/api/active-package/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required' });
-    }
-
     const activePackageCollection = db.collection('active_package');
     
-    // Find user's active package
     const activePackage = await activePackageCollection.findOne({
       userId: userId,
       status: 'active',
       expiryDate: { $gt: new Date() }
     });
     
-    if (!activePackage) {
-      return res.json({
-        hasActivePackage: false,
+    if (activePackage) {
+      res.json({
+        success: true,
+        package: activePackage
+      });
+    } else {
+      res.json({
+        success: false,
         message: 'No active package found'
       });
     }
-    
-    res.json({
-      hasActivePackage: true,
-      package: {
-        packageId: activePackage.packageId,
-        packageName: activePackage.packageName,
-        activationDate: activePackage.activationDate,
-        expiryDate: activePackage.expiryDate,
-        duration: activePackage.duration,
-        price: activePackage.price,
-        cristolCost: activePackage.cristolCost,
-        status: activePackage.status
-      }
-    });
     
   } catch (error) {
     console.error('Error fetching active package:', error);
@@ -283,15 +277,16 @@ app.get('/api/active-package/:userId', async (req, res) => {
   }
 });
 
-// Get all premium packages
+// Get premium packages
 app.get('/api/premium-packages', async (req, res) => {
   try {
     const premiumPackagesCollection = db.collection('premium_packages');
+    const cursor = await premiumPackagesCollection.find().sort({ price: 1 });
     
-    const packages = await premiumPackagesCollection
-      .find({})
-      .sort({ price: 1 })
-      .toArray();
+    const packages = [];
+    await cursor.forEach(doc => {
+      packages.push(doc);
+    });
     
     res.json(packages);
     
@@ -305,21 +300,20 @@ app.get('/api/premium-packages', async (req, res) => {
 app.get('/api/subscriber-count', async (req, res) => {
   try {
     const activePackageCollection = db.collection('active_package');
-    
+
     // Count active subscriptions (not expired)
     const count = await activePackageCollection.countDocuments({
       status: 'active',
       expiryDate: { $gt: new Date() }
     });
-    
+
     res.json({ count: count });
-    
+
   } catch (error) {
     console.error('Error fetching subscriber count:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-
 
 
 
