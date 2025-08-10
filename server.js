@@ -99,17 +99,6 @@ const tournamentUpload = multer({ storage: tournamentStorage });
 
 
 
-async function connectToDatabase() {
-  try {
-    const client = new MongoClient(MONGODB_URI);
-    await client.connect();
-    db = client.db('everesports');
-    console.log('Connected to MongoDB successfully');
-  } catch (error) {
-    console.error('Failed to connect to MongoDB:', error);
-    process.exit(1);
-  }
-}
 
 // API Endpoints
 
@@ -312,6 +301,24 @@ app.get('/api/premium-packages', async (req, res) => {
   }
 });
 
+// Get subscriber count
+app.get('/api/subscriber-count', async (req, res) => {
+  try {
+    const activePackageCollection = db.collection('active_package');
+    
+    // Count active subscriptions (not expired)
+    const count = await activePackageCollection.countDocuments({
+      status: 'active',
+      expiryDate: { $gt: new Date() }
+    });
+    
+    res.json({ count: count });
+    
+  } catch (error) {
+    console.error('Error fetching subscriber count:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 
 
