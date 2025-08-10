@@ -91,6 +91,238 @@ const mapsUpload = multer({ storage: mapsStorage });
 const tournamentUpload = multer({ storage: tournamentStorage });
 
 
+
+
+
+
+
+
+
+
+async function connectToDatabase() {
+  try {
+    const client = new MongoClient(MONGODB_URI);
+    await client.connect();
+    db = client.db('everesports');
+    console.log('Connected to MongoDB successfully');
+  } catch (error) {
+    console.error('Failed to connect to MongoDB:', error);
+    process.exit(1);
+  }
+}
+
+// API Endpoints
+
+// Get user's cristol balance
+app.get('/api/users-cristols/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const usersCristolsCollection = db.collection('users_cristols');
+    
+    // Find user's cristol document
+    const userCristol = await usersCristolsCollection.findOne({ userId: userId });
+    
+    if (!userCristol) {
+      // Create new cristol account if user doesn't have one
+      const newCristolAccount = {
+        userId: userId,
+        amountCristol: 0,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      };
+      
+      await usersCristolsCollection.insertOne(newCristolAccount);
+      
+      return res.json({
+        userId: userId,
+        amountCristol: 0,
+        message: 'New cristol account created'
+      });
+    }
+    
+    res.json({
+      userId: userCristol.userId,
+      amountCristol: userCristol.amountCristol || 0
+    });
+    
+  } catch (error) {
+    console.error('Error fetching user cristols:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Activate premium package
+app.post('/api/activate-package', async (req, res) => {
+  try {
+    const { userId, packageName, packageId, duration = 30, price } = req.body;
+    
+    if (!userId || !packageName || !packageId) {
+      return res.status(400).json({ 
+        error: 'userId, packageName, and packageId are required' 
+      });
+    }
+
+    // Convert price from USD to cristols (assuming 1 USD = 100 cristols)
+    const priceInUSD = parseFloat(price.replace(/[^0-9.]/g, ''));
+    const cristolCost = Math.round(priceInUSD * 100);
+    
+    // Check if user has sufficient cristols
+    const usersCristolsCollection = db.collection('users_cristols');
+    const userCristol = await usersCristolsCollection.findOne({ userId: userId });
+    
+    if (!userCristol || userCristol.amountCristol < cristolCost) {
+      return res.status(400).json({ 
+        error: 'Insufficient cristols',
+        required: cristolCost,
+        available: userCristol ? userCristol.amountCristol : 0
+      });
+    }
+    
+    // Calculate activation and expiry dates
+    const activationDate = new Date();
+    const expiryDate = new Date();
+    expiryDate.setDate(expiryDate.getDate() + duration);
+    
+    // Check if user already has an active package
+    const activePackageCollection = db.collection('active_package');
+    const existingActivePackage = await activePackageCollection.findOne({
+      userId: userId,
+      status: 'active',
+      expiryDate: { $gt: new Date() }
+    });
+    
+    if (existingActivePackage) {
+      return res.status(400).json({ 
+        error: 'User already has an active package',
+        currentPackage: existingActivePackage.packageName,
+        expiresAt: existingActivePackage.expiryDate
+      });
+    }
+    
+    // Create new active package record
+    const newActivePackage = {
+      userId: userId,
+      packageId: packageId,
+      packageName: packageName,
+      activationDate: activationDate,
+      expiryDate: expiryDate,
+      duration: duration,
+      price: price,
+      cristolCost: cristolCost,
+      status: 'active',
+      createdAt: new Date(),
+      updatedAt: new Date()
+    };
+    
+    await activePackageCollection.insertOne(newActivePackage);
+    
+    // Deduct cristols from user's account
+    await usersCristolsCollection.updateOne(
+      { userId: userId },
+      { 
+        $inc: { amountCristol: -cristolCost },
+        $set: { updatedAt: new Date() }
+      }
+    );
+    
+    res.json({
+      success: true,
+      message: 'Package activated successfully',
+      package: {
+        name: packageName,
+        activationDate: activationDate,
+        expiryDate: expiryDate,
+        duration: duration,
+        cristolCost: cristolCost
+      },
+      remainingCristol: userCristol.amountCristol - cristolCost
+    });
+    
+  } catch (error) {
+    console.error('Error activating package:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get user's active package
+app.get('/api/active-package/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const activePackageCollection = db.collection('active_package');
+    
+    // Find user's active package
+    const activePackage = await activePackageCollection.findOne({
+      userId: userId,
+      status: 'active',
+      expiryDate: { $gt: new Date() }
+    });
+    
+    if (!activePackage) {
+      return res.json({
+        hasActivePackage: false,
+        message: 'No active package found'
+      });
+    }
+    
+    res.json({
+      hasActivePackage: true,
+      package: {
+        packageId: activePackage.packageId,
+        packageName: activePackage.packageName,
+        activationDate: activePackage.activationDate,
+        expiryDate: activePackage.expiryDate,
+        duration: activePackage.duration,
+        price: activePackage.price,
+        cristolCost: activePackage.cristolCost,
+        status: activePackage.status
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error fetching active package:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all premium packages
+app.get('/api/premium-packages', async (req, res) => {
+  try {
+    const premiumPackagesCollection = db.collection('premium_packages');
+    
+    const packages = await premiumPackagesCollection
+      .find({})
+      .sort({ price: 1 })
+      .toArray();
+    
+    res.json(packages);
+    
+  } catch (error) {
+    console.error('Error fetching premium packages:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+
+
+
+
+
+
+
+
+
+
+
 // Multer storage for banner uploads
 const bannerStorage = multer.diskStorage({
   destination: function (req, file, cb) {
