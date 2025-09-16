@@ -11,7 +11,7 @@ require('dotenv').config();
 
 const app = express();
 const PORT = 3000;
-const MONGO_URI = 'mongodb://kavimark:kavimark@127.0.0.1:27017/everesports?authSource=';
+const MONGO_URI = 'mongodb://kavimark:kavimark%401996@192.168.43.227:27017/';
 const DB_NAME = 'everesports';
 let db;
 
